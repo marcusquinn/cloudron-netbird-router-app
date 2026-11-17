@@ -26,6 +26,7 @@ On a test Cloudron 10.1.6 (Ubuntu 26.04) with the patch applied, NetBird
 | Router stopped: allowed peer gets no response, public still `403` | passed (fails closed) |
 | Router started again: allowed peer recovers | `200` |
 | VPN access only turned off: resources removed, public access back | passed |
+| Router peer deleted in NetBird: status asks for a new key; new one-off key re-enrols and restores the routing peer | passed |
 
 Not tested yet: a peer on a different network (the test peers were Docker
 containers on the same host), direct (non-relayed) WireGuard, IPv6-only peers,
