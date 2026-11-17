@@ -14,13 +14,16 @@ NetBird admin.
 """
 
 import html
+import ipaddress
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -39,6 +42,12 @@ INTERVAL = max(10, int(os.environ.get("SYNC_INTERVAL", "30") or "30"))
 GROUP_NAME = os.environ.get("NETBIRD_RESOURCE_GROUP", "") or "Cloudron protected apps"
 NETWORK_NAME = os.environ.get("NETBIRD_NETWORK_NAME", "")
 HOSTNAME = os.environ.get("NETBIRD_HOSTNAME", "") or "cloudron-router-" + os.environ.get("CLOUDRON_APP_DOMAIN", "app").split(".")[0]
+# App ID of a NetBird server app on the same Cloudron. Cloudron's host firewall drops
+# container traffic to other apps' published TCP ports, so the router must reach the
+# server container directly. The NetBird package listens on container port 33074.
+SERVER_APP_ID = os.environ.get("NETBIRD_SERVER_APP_ID", "").strip()
+SERVER_CONTAINER_PORT = int(os.environ.get("NETBIRD_SERVER_CONTAINER_PORT", "33074") or "33074")
+HAIRPIN_TABLE = "cloudron_router_hairpin"
 
 
 def log(message):
@@ -99,6 +108,44 @@ def api(method, path, body=None):
 
 def netbird(*args, check=False):
     return subprocess.run([NETBIRD, *args], capture_output=True, text=True, check=check, timeout=120)
+
+
+def resolve(host):
+    v4, v6 = set(), set()
+    for family, _, _, _, sockaddr in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
+        (v4 if family == socket.AF_INET else v6).add(sockaddr[0])
+    return sorted(v4), sorted(v6)
+
+
+def apply_hairpin():
+    """Send this container's management/signal/relay traffic straight to a same-Cloudron server.
+
+    The NetBird server publishes one TCP port for all native traffic. From inside
+    Cloudron that published port is unreachable, so DNAT it, in this container's own
+    network namespace only, to the server container's fixed internal port.
+    Returns a short description, or None when not configured.
+    """
+    if not SERVER_APP_ID:
+        return None
+    parsed = urllib.parse.urlsplit(MANAGEMENT_URL)
+    port = parsed.port or 443
+    public_v4, public_v6 = resolve(parsed.hostname)
+    server_v4, server_v6 = resolve(SERVER_APP_ID)
+    rules = []
+    if public_v4 and server_v4:
+        rules.append(f"ip daddr {{ {', '.join(public_v4)} }} tcp dport {port} dnat ip to {server_v4[0]}:{SERVER_CONTAINER_PORT}")
+    if public_v6 and server_v6:
+        rules.append(f"ip6 daddr {{ {', '.join(public_v6)} }} tcp dport {port} dnat ip6 to [{server_v6[0]}]:{SERVER_CONTAINER_PORT}")
+    if not rules:
+        raise RuntimeError(f"could not resolve {parsed.hostname} or NetBird server app {SERVER_APP_ID}")
+    for address in public_v4 + public_v6:
+        if ipaddress.ip_address(address).is_private:
+            raise RuntimeError(f"{parsed.hostname} resolves to private address {address}; leave NETBIRD_SERVER_APP_ID unset")
+    ruleset = (f"table inet {HAIRPIN_TABLE} {{}}\nflush table inet {HAIRPIN_TABLE}\n"
+               f"table inet {HAIRPIN_TABLE} {{\n  chain output {{\n    type nat hook output priority -100; policy accept;\n"
+               + "".join(f"    {rule}\n" for rule in rules) + "  }\n}\n")
+    subprocess.run(["nft", "-f", "-"], input=ruleset, text=True, capture_output=True, check=True, timeout=30)
+    return f"{parsed.hostname}:{port} -> {SERVER_APP_ID} container port {SERVER_CONTAINER_PORT}"
 
 
 def wait_for_daemon():
@@ -283,9 +330,13 @@ def run_sync():
     wait_for_daemon()
     while True:
         try:
+            hairpin = apply_hairpin()
+            if hairpin:
+                status["sameCloudronServer"] = hairpin
+                log(f"same-Cloudron NetBird server: {hairpin}")
             connect(state)
             break
-        except RuntimeError as error:
+        except (RuntimeError, OSError, subprocess.SubprocessError) as error:
             status.update(phase="connecting", message=str(error))
             save_json(STATUS_FILE, status, 0o644)
             log(str(error))
@@ -293,6 +344,9 @@ def run_sync():
 
     while True:
         try:
+            # Container IPs survive restarts but not every restore; keep the DNAT current.
+            if SERVER_APP_ID:
+                status["sameCloudronServer"] = apply_hairpin()
             sync_once(state, status)
             status.pop("error", None)
         except (ApiError, RuntimeError, urllib.error.URLError, OSError, subprocess.SubprocessError) as error:
