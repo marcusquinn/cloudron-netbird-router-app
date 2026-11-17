@@ -159,10 +159,21 @@ def wait_for_daemon():
 
 
 def connect(state):
-    """Run `netbird up`; the setup key is used only until the first successful login."""
+    """Run `netbird up`; the setup key is used only until the first successful login.
+
+    If management forgets the peer later (deleted, or login expired) the daemon reports
+    NeedsLogin. Then only a setup key helps: `netbird up` without one would wait for an
+    interactive SSO login that never comes.
+    """
     args = ["up", "--management-url", MANAGEMENT_URL, "--hostname", HOSTNAME,
             "--disable-client-routes", "--enable-rosenpass", "--rosenpass-permissive"]
+    needs_login = "NeedsLogin" in netbird("status").stdout
+    if needs_login and state.get("registered"):
+        state["registered"] = False
+        save_json(STATE_FILE, state)
     use_key = bool(SETUP_KEY) and not state.get("registered")
+    if needs_login and not use_key:
+        raise RuntimeError("NetBird peer needs a new login (deleted or expired): set a new one-off NETBIRD_SETUP_KEY")
     if use_key:
         with open(os.open(SETUP_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as handle:
             handle.write(SETUP_KEY)
@@ -175,13 +186,8 @@ def connect(state):
     if result.returncode != 0:
         # netbird up does not print the setup key; keep only the last lines.
         message = " | ".join((result.stderr or result.stdout).strip().splitlines()[-3:])
-        if "PermissionDenied" in message or "no peer auth method" in message:
-            # Management no longer knows this peer (deleted, or login expired). Use the
-            # setup key again on the next attempt; a used one-off key must be replaced.
-            if state.get("registered"):
-                state["registered"] = False
-                save_json(STATE_FILE, state)
-            message += " (re-enrol: set a new one-off NETBIRD_SETUP_KEY)"
+        if use_key:
+            message += " (a used one-off NETBIRD_SETUP_KEY must be replaced)"
         raise RuntimeError("netbird up failed: " + message)
     state["registered"] = True
     save_json(STATE_FILE, state)
