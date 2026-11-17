@@ -10,6 +10,27 @@ Cloudron's OpenVPN app does for OpenVPN clients.
 > select any app with the `net_admin` capability. Until Cloudron ships it, this
 > package only runs on a test Cloudron with that patch applied.
 
+### Tested so far
+
+On a test Cloudron 10.1.6 (Ubuntu 26.04) with the patch applied, NetBird
+0.83.1, and the NetBird server on the same Cloudron:
+
+| Check | Result |
+|-------|--------|
+| Router registers, connects to management, signal and relay | passed |
+| Router creates the network, routing peer (masquerade) and group | passed |
+| Marking an app VPN access only adds its FQDNs as resources within one sync | passed |
+| Peer in an allowed group gets the app over the mesh (relayed WireGuard) | `200` |
+| Peer in the same account without a policy | `403` |
+| Public internet | `403` |
+| Router stopped: allowed peer gets no response, public still `403` | passed (fails closed) |
+| Router started again: allowed peer recovers | `200` |
+| VPN access only turned off: resources removed, public access back | passed |
+
+Not tested yet: a peer on a different network (the test peers were Docker
+containers on the same host), direct (non-relayed) WireGuard, IPv6-only peers,
+custom tunnel CIDRs, Cloudron restore, and the dashboard selection UI.
+
 ## How it works
 
 1. Cloudron trusts traffic from the selected VPN app's container IP on apps
@@ -54,10 +75,20 @@ You need a NetBird management server (for example the
    `NETBIRD_MANAGEMENT_URL` is what clients use with `netbird up`;
    `NETBIRD_API_URL` is the dashboard origin. The setup key is only used for
    the first login, so you can delete it afterwards.
+
+   **NetBird server on the same Cloudron:** Cloudron's firewall drops traffic
+   from app containers to other apps' published TCP ports, so the router can't
+   reach the server's native port through the public address. Also set
+   `NETBIRD_SERVER_APP_ID` to the NetBird app's ID (`cloudron list`). The router
+   then rewrites, inside its own container only, connections to the management
+   host and port to the server container's internal port `33074`
+   (`NETBIRD_SERVER_CONTAINER_PORT`). Leave it unset for a remote server.
 4. In Cloudron, select this app as the VPN app (**Network > VPN Access**), then
    mark apps as VPN access only.
 5. In NetBird, create an access policy from the groups that should reach the
-   protected apps to the destination group **Cloudron protected apps**.
+   protected apps to the destination group **Cloudron protected apps**. New
+   NetBird accounts have a *Default* policy from *All* to *All*; while it's
+   enabled, every peer reaches the protected apps.
 
 The app's own page shows its sync status. It's behind Cloudron login.
 
@@ -74,6 +105,14 @@ minimum 10).
   to the same host IP and port 443, and NetBird policies match destination IPs.
   So a peer allowed to reach one protected app can request the others. Each
   app's own login remains a separate boundary.
+- **Don't mark the NetBird server's own domain VPN access only** when it's also
+  the management domain. Clients resolve the management domain themselves,
+  never through the mesh, so it stays unreachable; and you'd need the mesh to
+  sign in to the dashboard that manages the mesh. Put a separate alias on the
+  app if you want a mesh-only dashboard address.
+- Cloudron must refuse to mark the selected VPN app itself VPN access only. The
+  proposed patch adds that check; stock Cloudron 10.1.6 only refuses it for the
+  OpenVPN app.
 - The router runs with `--disable-client-routes`, so routes from other NetBird
   routers can't pull its own traffic away from Cloudron.
 - The status page listens on the container's Cloudron address only, not on the
