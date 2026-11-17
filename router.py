@@ -111,8 +111,8 @@ def api(method, path, body=None):
 
 # --- NetBird daemon --------------------------------------------------------
 
-def netbird(*args, check=False):
-    return subprocess.run([NETBIRD, *args], capture_output=True, text=True, check=check, timeout=120)
+def netbird(*args, check=False, timeout=120):
+    return subprocess.run([NETBIRD, *args], capture_output=True, text=True, check=check, timeout=timeout)
 
 
 def resolve(host):
@@ -179,13 +179,16 @@ def connect(state):
             handle.write(SETUP_KEY)
         args += ["--setup-key-file", SETUP_KEY_FILE]
     try:
-        result = netbird(*args)
+        # Without a key, a peer management has forgotten makes `up` wait for SSO; the
+        # daemon then reports NeedsLogin and the next attempt takes the branch above.
+        result = netbird(*args, timeout=120 if use_key else 45)
     finally:
         if use_key and os.path.exists(SETUP_KEY_FILE):
             os.unlink(SETUP_KEY_FILE)
     if result.returncode != 0:
         # netbird up does not print the setup key; keep only the last lines.
-        message = " | ".join((result.stderr or result.stdout).strip().splitlines()[-3:])
+        lines = [line for line in (result.stderr or result.stdout).strip().splitlines() if not line.startswith("Flag --")]
+        message = " | ".join(lines[-3:])
         if use_key:
             message += " (a used one-off NETBIRD_SETUP_KEY must be replaced)"
         raise RuntimeError("netbird up failed: " + message)
@@ -357,7 +360,7 @@ def run_sync():
     while True:
         try:
             hairpin = apply_hairpin()
-            if hairpin:
+            if hairpin and hairpin != status.get("sameCloudronServer"):
                 status["sameCloudronServer"] = hairpin
                 log(f"same-Cloudron NetBird server: {hairpin}")
             connect(state)
