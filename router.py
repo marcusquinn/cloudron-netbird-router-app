@@ -48,6 +48,7 @@ HOSTNAME = os.environ.get("NETBIRD_HOSTNAME", "") or "cloudron-router-" + os.env
 SERVER_APP_ID = os.environ.get("NETBIRD_SERVER_APP_ID", "").strip()
 SERVER_CONTAINER_PORT = int(os.environ.get("NETBIRD_SERVER_CONTAINER_PORT", "33074") or "33074")
 HAIRPIN_TABLE = "cloudron_router_hairpin"
+RECONNECT_AFTER = 4  # sync cycles without a management connection before `netbird up` again
 
 
 def log(message):
@@ -90,7 +91,11 @@ def http_json(method, url, body=None, headers=None, timeout=20):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
-            return response.status, (json.loads(raw) if raw else None)
+            try:
+                return response.status, (json.loads(raw) if raw else None)
+            except ValueError as error:
+                # e.g. NETBIRD_API_URL pointing at a page that answers 200 with HTML
+                raise ApiError(f"{method} {urllib.parse.urlsplit(url).path} returned non-JSON (HTTP {response.status})") from error
     except urllib.error.HTTPError as error:
         detail = error.read()[:300].decode(errors="replace")
         return error.code, {"error": detail}
@@ -169,8 +174,15 @@ def connect(state):
             os.unlink(SETUP_KEY_FILE)
     if result.returncode != 0:
         # netbird up does not print the setup key; keep only the last lines.
-        tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
-        raise RuntimeError("netbird up failed: " + " | ".join(tail))
+        message = " | ".join((result.stderr or result.stdout).strip().splitlines()[-3:])
+        if "PermissionDenied" in message or "no peer auth method" in message:
+            # Management no longer knows this peer (deleted, or login expired). Use the
+            # setup key again on the next attempt; a used one-off key must be replaced.
+            if state.get("registered"):
+                state["registered"] = False
+                save_json(STATE_FILE, state)
+            message += " (re-enrol: set a new one-off NETBIRD_SETUP_KEY)"
+        raise RuntimeError("netbird up failed: " + message)
     state["registered"] = True
     save_json(STATE_FILE, state)
 
@@ -199,8 +211,11 @@ def find_peer_id(netbird_ip):
 
 def ensure_group(state):
     groups = api("GET", "/groups") or []
+    for group in groups:  # saved ID first, so a rename or a same-named group can't move resources
+        if group.get("id") == state.get("group_id"):
+            return group["id"]
     for group in groups:
-        if group.get("id") == state.get("group_id") or group.get("name") == GROUP_NAME:
+        if group.get("name") == GROUP_NAME:
             return group["id"]
     created = api("POST", "/groups", {"name": GROUP_NAME})
     log(f"created NetBird group '{GROUP_NAME}'")
@@ -291,8 +306,13 @@ def sync_once(state, status):
     status.update(selected=True, tunnelMode=routing.get("mode"))
     netbird_ip = own_netbird_ip()
     if not netbird_ip:
-        status.update(phase="connecting", message="NetBird daemon is not connected to management yet.")
+        status.update(phase="connecting", message="NetBird daemon is not connected to management.")
+        status["offlineCycles"] = status.get("offlineCycles", 0) + 1
+        if status["offlineCycles"] >= RECONNECT_AFTER:
+            status["offlineCycles"] = 0
+            connect(state)  # raises with the reason, which the sync loop records
         return
+    status.pop("offlineCycles", None)
     status["netbirdIp"] = netbird_ip
 
     desired = desired_addresses(config)
@@ -349,8 +369,9 @@ def run_sync():
                 status["sameCloudronServer"] = apply_hairpin()
             sync_once(state, status)
             status.pop("error", None)
-        except (ApiError, RuntimeError, urllib.error.URLError, OSError, subprocess.SubprocessError) as error:
-            status.update(phase="error", error=str(error))
+        except (ApiError, RuntimeError, urllib.error.URLError, OSError, subprocess.SubprocessError,
+                KeyError, TypeError, AttributeError) as error:  # last three: unexpected API response shapes
+            status.update(phase="error", error=f"{type(error).__name__}: {error}")
             log(f"sync failed: {error}")
         status["lastSync"] = time.time()
         save_json(STATUS_FILE, status, 0o644)
