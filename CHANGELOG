@@ -1,0 +1,3 @@
+[0.1.0]
+* First experimental release: NetBird 0.83.1 routing peer that syncs Cloudron VPN-protected apps to NetBird domain resources. Needs a Cloudron that accepts net_admin apps as the VPN app.
+* NETBIRD_SERVER_APP_ID reaches a NetBird server on the same Cloudron through the container network.
