@@ -1,0 +1,37 @@
+{
+  "id": "io.netbird.router.cloudronapp",
+  "title": "NetBird Router",
+  "author": "Marcus Quinn <marcus@marcusquinn.com>",
+  "description": "NetBird routing peer that makes Cloudron apps marked 'VPN access only' reachable from a NetBird mesh. It reads the protected app list from Cloudron and keeps matching NetBird network resources in sync. Requires a Cloudron that accepts net_admin apps as the VPN app.",
+  "tagline": "Reach VPN-only Cloudron apps over NetBird",
+  "version": "0.1.0",
+  "upstreamVersion": "0.83.1",
+  "healthCheckPath": "/healthz",
+  "httpPort": 8000,
+  "manifestVersion": 2,
+  "website": "https://netbird.io",
+  "contactEmail": "marcus@marcusquinn.com",
+  "icon": "file://logo.png",
+  "documentationUrl": "https://github.com/marcusquinn/cloudron-netbird-router-app#readme",
+  "minBoxVersion": "10.1.6",
+  "memoryLimit": 268435456,
+  "capabilities": [
+    "net_admin"
+  ],
+  "addons": {
+    "localstorage": {},
+    "proxyAuth": {}
+  },
+  "tags": [
+    "vpn",
+    "wireguard",
+    "netbird",
+    "networking",
+    "security"
+  ],
+  "postInstallMessage": "Configure the router with `cloudron env set --app ${CLOUDRON_APP_DOMAIN} NETBIRD_MANAGEMENT_URL=... NETBIRD_API_URL=... NETBIRD_SETUP_KEY=... NETBIRD_API_TOKEN=...`, then select this app as the VPN app in Cloudron. See the README for the NetBird service user, setup key and access policy this needs.\n\nEverything that leaves this app is trusted as VPN traffic by Cloudron. Install nothing else in it.",
+  "changelog": "file://CHANGELOG",
+  "packagerName": "Marcus Quinn",
+  "packagerUrl": "https://github.com/marcusquinn",
+  "packageUrl": "https://github.com/marcusquinn/cloudron-netbird-router-app"
+}
